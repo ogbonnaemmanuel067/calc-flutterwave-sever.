@@ -1,0 +1,55 @@
+// server.js
+const express = require("express");
+const fetch = require("node-fetch");
+const app = express();
+
+app.use(express.json());
+
+const FLW_SECRET_KEY = process.env.FLW_SECRET_KEY; // Set in Render (do NOT put actual key here)
+const PORT = process.env.PORT || 3000;
+
+const PRICE_MAP = { NGN: 6000, USD: 7000, EUR: 7000, GBP: 7000 };
+const payments = {}; // In-memory store (okay for demo/testing)
+
+app.get("/", (req, res) => res.send("OK - payment verifier"));
+
+// Client calls this to create a tx_ref before opening Flutterwave checkout
+app.post("/create_tx", (req, res) => {
+  try {
+    const { currency = "NGN", userId = null } = req.body;
+    const amount = PRICE_MAP[currency] || PRICE_MAP.NGN;
+    const tx_ref = `calc-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    payments[tx_ref] = { amount, currency, userId, createdAt: Date.now(), verified: false };
+    return res.json({ ok: true, tx_ref, amount, currency });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
+// Verify tx_ref with Flutterwave (server-side)
+app.get("/verify/:tx_ref", async (req, res) => {
+  const tx_ref = req.params.tx_ref;
+  if (!payments[tx_ref]) return res.status(404).json({ ok: false, error: "tx_ref not found on server" });
+  try {
+    const url = `https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=${encodeURIComponent(tx_ref)}`;
+    const resp = await fetch(url, { headers: { Authorization: `Bearer ${FLW_SECRET_KEY}` } });
+    const data = await resp.json();
+
+    const txData = data.data || {};
+    const apiOk = data.status === "success" || data.status === "successful";
+    const txSuccessful = txData.status === "successful" || txData.status === "success";
+    const amountMatches = Number(txData.amount) === Number(payments[tx_ref].amount);
+    const currencyMatches = (txData.currency || "").toUpperCase() === (payments[tx_ref].currency || "").toUpperCase();
+
+    if (apiOk && txSuccessful && amountMatches && currencyMatches) {
+      payments[tx_ref].verified = true;
+      return res.json({ ok: true, verified: true, details: txData });
+    } else {
+      return res.json({ ok: true, verified: false, details: txData, reason: { apiOk, txSuccessful, amountMatches, currencyMatches } });
+    }
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
+app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
